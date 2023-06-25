@@ -1,4 +1,4 @@
-ESX = nil
+ESX = exports["es_extended"]:getSharedObject()
 QBCore = nil
 vehicletable = 'owned_vehicles'
 vehiclemod = 'vehicle'
@@ -8,42 +8,51 @@ garage_id = 'garage_id'
 type_ = 'type'
 Initialized()
 local vehicles = {}
-local shops = {}
-Citizen.CreateThread(function()
-    for k,v in pairs(VehicleShop) do
-        local list, foundshop = GetVehiclesFromShop(k or 'pdm')
-        if not shops[k] then shops[k] = {} end
-        --TriggerClientEvent('table',-1,Owned_Vehicle)
-        if v.shop then
-            shops[k].list = v.shop
-            shops[k].type = v.type
-        else
-            shops[k].list = list
-            shops[k].type = v.type
-        end
-    end
-    GlobalState.VehicleShops = shops
-end)
 
-function GetVehiclesFromShop(shop)
-    local vehicles = {}
-    local found = false
-    for k,v in pairs(Config.Vehicles) do
-        if v.shop == shop then
-            vehicles[k] = v
-            found = true
+RegisterServerEvent('renzu_vehicleshop:GetAvailableVehicle')
+AddEventHandler('renzu_vehicleshop:GetAvailableVehicle', function(shop)
+    local src = source 
+    local xPlayer = GetPlayerFromId(src)
+    local identifier = xPlayer.identifier
+    local shop = shop or 'pdm'
+    Owned_Vehicle = {}
+    local othershop = false
+    if Config.framework == 'ESX' then
+        Owned_Vehicle = CustomsSQL(Config.Mysql,'fetchAll','SELECT * FROM vehicles WHERE shop = @shop',{['@shop'] = shop})
+    else
+        if shop ~= 'pdm' then
+            othershop = true
         end
+        Owned_Vehicle = QBCore.Shared.Vehicles
     end
-    return vehicles, found
-end
+    --TriggerClientEvent('table',-1,Owned_Vehicle)
+    if Config.framework == 'ESX' and Owned_Vehicle[1] and not othershop or Config.framework == 'QBCORE' and Owned_Vehicle and not othershop then
+        Owned_Vehicle = Owned_Vehicle
+    else
+        local shoplist = {}
+        for k,v in pairs(VehicleShop[shop].shop) do
+            local grade = xPlayer.job.grade
+            if type(xPlayer.job.grade) == 'table' then
+                grade = xPlayer.job.grade.level
+            end
+            if v.grade ~= nil and tonumber(v.grade) <= tonumber(grade) then
+                shoplist[k] = v
+            elseif v.grade == nil then
+                shoplist[k] = v
+            end
+        end
+        Owned_Vehicle = shoplist
+    end
+    TriggerClientEvent("renzu_vehicleshop:receive_vehicles", src , Owned_Vehicle,VehicleShop[shop].type or 'car')
+end)
 
 local NumberCharset = {}
 for i = 48,  57 do table.insert(NumberCharset, string.char(i)) end
 
 function Deleteveh(plate,src)
-    local plate = string.gsub(plate, '^%s*(.-)%s*$', '%1')
+    local plate = tostring(plate)
     if plate and type(plate) == 'string' then
-        CustomsSQL(Config.Mysql,'execute','DELETE FROM '..vehicletable..' WHERE TRIM(UPPER(plate)) = @plate',{['@plate'] = plate})
+        CustomsSQL(Config.Mysql,'execute','DELETE FROM '..vehicletable..' WHERE TRIM(UPPER(plate)) = @plate',{['@plate'] = string.gsub(plate:upper(), ' ', '')})
     else
         print('error not string - Delete Vehicle')
     end
@@ -62,7 +71,12 @@ AddEventHandler('renzu_vehicleshop:sellvehicle', function()
     if r and #r > 0 then
         local model = json.decode(r[1][vehiclemod]).model
         if model == GetEntityModel(vehicle) then
-            result = Config.Vehicles
+            result = {}
+            if Config.framework == 'ESX' then
+                result = CustomsSQL(Config.Mysql,'fetchAll','SELECT * FROM vehicles', {})
+            elseif Config.framework == 'QBCORE' then
+                result = QBCore.Shared.Vehicles
+            end
                 if result then
                     for k,v in pairs(result) do
                         if model == GetHashKey(v.model) then
@@ -80,6 +94,7 @@ AddEventHandler('renzu_vehicleshop:sellvehicle', function()
         end
     else
         xPlayer.showNotification('You dont owned this vehicle',1,0,110)
+        print("not owned")
     end
 end)
 
@@ -102,19 +117,36 @@ RegisterServerCallBack_('renzu_vehicleshop:GenPlate', function (source, cb, pref
 end)
 
 RegisterServerCallBack_('renzu_vehicleshop:buyvehicle', function (source, cb, model, props, payment, job, type, garage, notregister)
+    print("BUYING START",model)
     local source = source
 	local xPlayer = GetPlayerFromId(source)
+    local function sqlfunc(sql, query)
+        if Config.framework == 'ESX' then
+            result = CustomsSQL(Config.Mysql,'fetchAll',query,{
+                ['@model'] = model
+            })
+            cb(Buy(result,xPlayer,model, props, payment, job, type , garage))
+        else
+            cb(Buy({[1] = QBCore.Shared.Vehicles[model]},xPlayer,model, props, payment, job, type , garage))
+            return result
+        end
+    end
+    --print(type)
     if not job and type == 'car' and not notregister then
-        cb(Buy({[1] = Config.Vehicles[model]},xPlayer,model, props, payment, job, type , garage))
+        print("BUYING VEHICLES SAVED FROM SQL vehicles tables")
+        sqlfunc(Config.Mysql,'SELECT * FROM vehicles WHERE model = @model LIMIT 1')
     elseif notregister then
+        print('DISPLAY',model, props)
         cb(Buy(true,xPlayer,model, props, payment or 'cash', job or 'civ', type or 'car' , garage or 'A' or false, notregister))
     else
+        print("BUYING CUSTOM CARS FROM CONFIG SHOP")
         for k,v in pairs(VehicleShop) do
             local actualShop = v
-            if v.job == job and v.shop then
+            if v.job == job then
                 local result = {}
                 for k,v in pairs(v.shop) do
                     if v.model:lower() == model:lower() then
+                        print("FOUND A MATCHING MODEL")
                         result[1] = {}
                         result[1].model = v.model
                         result[1].price = v.price
@@ -127,7 +159,10 @@ RegisterServerCallBack_('renzu_vehicleshop:buyvehicle', function (source, cb, mo
                 local result = {}
                 if v.shop then
                     for k,v in pairs(v.shop) do
+                        --print(model)
                         if v.model:lower() == model:lower() then
+                            --print(model)
+                            print("FOUND A MATCHING MODEL")
                             result[1] = {}
                             result[1].model = v.model
                             result[1].price = v.price
@@ -142,13 +177,13 @@ RegisterServerCallBack_('renzu_vehicleshop:buyvehicle', function (source, cb, mo
     end
 end)
 
-local temp = {}
-
 function Buy(result,xPlayer,model, props, payment, job, type, garage, notregister)
     fetchdone = false
     bool = false
     model = model
+    --print(notregister," FUNCTION  BUY",model,notregister,garage,type,job,payment,props)
     if result then
+        print("RESULT FETCHED")
         local price = nil
         local stock = nil
         if not notregister then
@@ -167,6 +202,7 @@ function Buy(result,xPlayer,model, props, payment, job, type, garage, notregiste
         end
         stock = 999      
         if money then
+            --print("MONEY CONDITION",price,props,xPlayer.getMoney(),xPlayer.citizenid)
             if payment == 'cash' then
                 xPlayer.removeMoney(tonumber(price))
             elseif payment == 'bank' then
@@ -176,35 +212,42 @@ function Buy(result,xPlayer,model, props, payment, job, type, garage, notregiste
             end
             stock = stock - 1
             local data = json.encode(props)
-            local query = 'INSERT INTO '..vehicletable..' ('..owner..', plate, '..vehiclemod..', job, `'..stored..'`, '..garage_id..', `'..type_..'`) VALUES (@'..owner..', @plate, @props, @job, @'..stored..', @'..garage_id..', @'..type_..')'
+            if Config.framework == 'QBCORE' then
+                type = model
+            end
+            local query = 'INSERT INTO '..vehicletable..' ('..owner..', plate, '..vehiclemod..', `'..stored..'`, '..garage_id..', `'..type_..'`) VALUES (@'..owner..', @plate, @props, @'..stored..', @'..garage_id..', @'..type_..')'
+            if Config.framework == 'QBCORE' then
+                query = 'INSERT INTO '..vehicletable..' ('..owner..', plate, '..vehiclemod..', `'..stored..'`, '..garage_id..', `'..type_..'`, citizenid, hash) VALUES (@'..owner..', @plate, @props, @'..stored..', @'..garage_id..', @'..type_..', @citizenid, @hash)'
+            end
             local var = {
                 ['@'..owner..'']   = xPlayer.identifier,
                 ['@plate']   = props.plate:upper(),
                 ['@props'] = data,
-                ['@job'] = job,
                 ['@'..stored..''] = 1,
                 ['@'..garage_id..''] = garage,
                 ['@'..type_..''] = type
             }
             if Config.framework == 'QBCORE' then
-                query = 'INSERT INTO '..vehicletable..' ('..owner..', plate, '..vehiclemod..', `'..stored..'`, job, '..garage_id..', `'..type_..'`, `hash`, `citizenid`) VALUES (@'..owner..', @plate, @props, @'..stored..', @job, @'..garage_id..', @vehicle, @hash, @citizenid)'
+                var['@hash'] = tostring(GetHashKey(model))
+                var['@citizenid'] = xPlayer.citizenid
+            end
+            if Config.SaveJob and job ~= false and not Config.framework == 'QBCORE' then
+                query = 'INSERT INTO '..vehicletable..' ('..owner..', plate, '..vehiclemod..', `'..stored..'`, job, '..garage_id..', `'..type_..'`) VALUES (@'..owner..', @plate, @props, @'..stored..', @job, @'..garage_id..', @'..type_..')'
                 var = {
                     ['@'..owner..'']   = xPlayer.identifier,
                     ['@plate']   = props.plate:upper(),
                     ['@props'] = data,
                     ['@'..stored..''] = 1,
                     ['@job'] = job,
-                    ['@'..garage_id..''] = 'pillboxgarage',
-                    ['@vehicle'] = model,
-                    ['@hash'] = tostring(GetHashKey(model)),
-                    ['@citizenid'] = xPlayer.citizenid,
+                    ['@'..garage_id..''] = garage,
+                    ['@'..type_..''] = type
                 }
             end
             CustomsSQL(Config.Mysql,'execute',query,var)
             fetchdone = true
             bool = true
+            print("BUY DONE")
             Config.Carkeys(props.plate,xPlayer.source)
-            temp[props.plate] = true
             --TriggerClientEvent('mycarkeys:setowned',xPlayer.source,props.plate) -- sample
         else
             print("NOT ENOUGH MONEY")
@@ -219,21 +262,9 @@ function Buy(result,xPlayer,model, props, payment, job, type, garage, notregiste
         bool = false
     end
     while not fetchdone do Wait(0) end
+    print("SENDING TO CLIENT SUCCESS")
     return bool
 end
-
-local Charset = {}
-for i = 65,  90 do table.insert(Charset, string.char(i)) end
-for i = 97, 122 do table.insert(Charset, string.char(i)) end
-CreateThread(function()
-    Wait(1000)
-    local vehicles = CustomsSQL(Config.Mysql,'fetchAll','SELECT * FROM '..vehicletable..'',{})
-    for k,v in pairs(vehicles) do
-        if v.plate ~= nil then
-            temp[v.plate] = v
-        end
-    end
-end)
 
 function GetRandomLetter(length)
 	math.randomseed(GetGameTimer())
@@ -251,6 +282,7 @@ function GenPlate(prefix)
         return plate
     end
     Wait(1)
+    print(plate)
     return GenPlate(prefix)
 end
 
@@ -279,22 +311,10 @@ function NumRand()
 end
 
 function GetRandomNumber(length)
-	math.randomseed(os.time()+math.random(19999,999999))
+	math.randomseed(GetGameTimer())
 	if length > 0 then
 		return GetRandomNumber(length - 1) .. NumberCharset[math.random(1, #NumberCharset)]
 	else
 		return ''
 	end
 end
-
-exports('GenPlate', function(plate)
-    return GenPlate(plate)
-end)
-
-exports('VehiclesList', function()
-    return Config.Vehicles
-end)
-
-exports('Deleteveh', function(plate)
-    return Deleteveh(plate)
-end)
